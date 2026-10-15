@@ -35,6 +35,15 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p 41769 -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
           echo "SSH环境配置完成，尝试连接服务器..."
+          # 把本地最新代码上传到服务器，替代git pull
+          scp \
+            -P 41769 \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o HostKeyAlgorithms=+ssh-rsa \
+            -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+            -r ./* root@${{ secrets.TOUGE_SERVER_IP }}:/root/flask-web-app/
+
           ssh \
             -p 41769 \
             -o IdentitiesOnly=yes \
@@ -45,7 +54,6 @@ jobs:
               set +e
               echo "成功连接服务器：$(whoami)@$(hostname)"
               cd /root/flask-web-app || { echo "项目目录不存在"; exit 1; }
-              git pull origin main || { echo "Git拉取失败"; exit 1; }
               pip3 install --upgrade pip
               pip3 install -r requirements.txt || { echo "依赖安装失败"; exit 1; }
               # 杀死旧gunicorn进程
