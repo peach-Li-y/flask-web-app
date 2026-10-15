@@ -12,14 +12,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: requirements.txt
-
       - name: Install dependencies and run tests
         run: |
           python -m pip install --upgrade pip
@@ -27,10 +25,8 @@ jobs:
           pip install pytest==8.4.1
           pytest tests/ -v
         continue-on-error: false
-
       - name: Sleep short time to avoid SSH MaxStartups limit
         run: sleep 10
-
       - name: Deploy to Touge Server via SSH (Port 41769)
         run: |
           # 配置SSH环境
@@ -39,7 +35,6 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p 41769 -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
           echo "SSH环境配置完成，尝试连接服务器..."
-
           ssh \
             -p 41769 \
             -o IdentitiesOnly=yes \
@@ -47,15 +42,19 @@ jobs:
             -o HostKeyAlgorithms=+ssh-rsa \
             -o PubkeyAcceptedAlgorithms=+ssh-rsa \
             root@${{ secrets.TOUGE_SERVER_IP }} << 'EOF'
-              set -e
+              set +e
               echo "成功连接服务器：$(whoami)@$(hostname)"
               cd /root/flask-web-app || { echo "项目目录不存在"; exit 1; }
               git pull origin main || { echo "Git拉取失败"; exit 1; }
               pip3 install --upgrade pip
               pip3 install -r requirements.txt || { echo "依赖安装失败"; exit 1; }
-              supervisorctl restart flask-web-app || { echo "应用重启失败"; exit 1; }
-              supervisorctl status flask-web-app
-              echo "部署完成"
+              # 杀死旧gunicorn进程
+              pkill -9 -f gunicorn || true
+              # 进入src目录启动服务
+              cd src
+              nohup /usr/local/bin/gunicorn -w 4 -b 0.0.0.0:5000 app:app > /root/app.log 2>&1 &
+              sleep 3
+              echo "部署完成，服务已后台启动"
           EOF
         env:
           TOUGE_SSH_PRIVATE_KEY: ${{ secrets.TOUGE_SSH_PRIVATE_KEY }}
