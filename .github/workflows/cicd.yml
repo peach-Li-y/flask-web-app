@@ -29,22 +29,14 @@ jobs:
         run: sleep 10
       - name: Deploy to Touge Server via SSH (Port 41769)
         run: |
-          # 配置SSH环境
           mkdir -p ~/.ssh
           printf "%s\n" "${{ secrets.TOUGE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p 41769 -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
-          echo "SSH环境配置完成，尝试连接服务器..."
-          # 把本地最新代码上传到服务器，替代git pull
-          scp \
-            -P 41769 \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=no \
-            -o HostKeyAlgorithms=+ssh-rsa \
-            -o PubkeyAcceptedAlgorithms=+ssh-rsa \
-            -r ./* root@${{ secrets.TOUGE_SERVER_IP }}:/root/flask-web-app/
 
-          ssh \
+          echo "开始传输代码并部署（单条SSH会话）"
+          # tar打包本地代码，管道传给远端，只建立一次ssh连接！！
+          tar -cf - ./* | ssh \
             -p 41769 \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=no \
@@ -52,17 +44,20 @@ jobs:
             -o PubkeyAcceptedAlgorithms=+ssh-rsa \
             root@${{ secrets.TOUGE_SERVER_IP }} << 'EOF'
               set +e
-              echo "成功连接服务器：$(whoami)@$(hostname)"
-              cd /root/flask-web-app || { echo "项目目录不存在"; exit 1; }
+              echo "连接成功，接收代码包..."
+              mkdir -p /root/flask-web-app
+              cd /root/flask-web-app
+              tar -xf -
+              echo "代码解压完成"
+
               pip3 install --upgrade pip
               pip3 install -r requirements.txt || { echo "依赖安装失败"; exit 1; }
-              # 杀死旧gunicorn进程
+
               pkill -9 -f gunicorn || true
-              # 进入src目录启动服务
               cd src
               nohup /usr/local/bin/gunicorn -w 4 -b 0.0.0.0:5000 app:app > /root/app.log 2>&1 &
               sleep 3
-              echo "部署完成，服务已后台启动"
+              echo "✅部署全部完成"
           EOF
         env:
           TOUGE_SSH_PRIVATE_KEY: ${{ secrets.TOUGE_SSH_PRIVATE_KEY }}
