@@ -3,10 +3,38 @@ on:
   push:
     branches:
       - main
+
 jobs:
-  deploy:
+  test:
+    name: CI 单元测试
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies and run tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest==8.4.1
+          pytest tests/ -v
+        continue-on-error: false
+
+  deploy:
+    name: CD 部署到头歌服务器
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # 🔴关键：写在job这一层，让SSH失败不会让整个流水线失败
+    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,65 +48,27 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
-      - name: Install dependencies and run tests
+      - name: Deploy to Touge Server via SSH (Port 51727)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest==8.4.1
-          pytest tests/ -v
-        continue-on-error: false
+          mkdir -p ~/.ssh
+          printf "%s\n" "${{ secrets.TOUGE_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p 51727 -H ${{ secrets.TOUGE_SERVER_IP }} >> ~/.ssh/known_hosts
 
-      - name: Sleep short time to avoid SSH MaxStartups limit
-        run: sleep 10
-
-      # ========= 第1次SSH：清理服务器旧文件 =========
-      - name: SSH clean old files
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.TOUGE_SERVER_IP }}
-          port: 41769
-          username: root
-          key: ${{ secrets.TOUGE_SSH_PRIVATE_KEY }}
-          script: |
-            set +e
-            mkdir -p /root/flask-web-app
-            cd /root/flask-web-app
-            rm -rf src requirements.txt tests
-            pkill -9 -f gunicorn || true
-            echo "服务器旧文件清理完成"
-
-      # 非常关键！两次ssh之间必须sleep，防止头歌防火墙直接断开连接
-      - name: Cool down for ssh
-        run: sleep 8
-
-      # ========= 第2次SSH：上传zip包，解压，部署 =========
-      - name: SSH upload zip and deploy app
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.TOUGE_SERVER_IP }}
-          port: 41769
-          username: root
-          key: ${{ secrets.TOUGE_SSH_PRIVATE_KEY }}
-          script_stop: false
-          script: |
-            set +e
-            cd /root/flask-web-app
-            # github runner本地把代码打成zip，通过stdin传到远端
-            cat > app.zip <<'ZIPEND'
-${{ github.workspace }}/*.zip
-ZIPEND
-          script_raw: |
-            cd /root/flask-web-app
-            # 从github runner本地把全部代码压缩为zip，通过管道传到服务器
-            cd $GITHUB_WORKSPACE
-            zip -q -r - . -x ".git/*" > /tmp/app.zip
-            cat /tmp/app.zip | ssh -p 41769 -o StrictHostKeyChecking=no root@${{ secrets.TOUGE_SERVER_IP }} "cd /root/flask-web-app; cat > app.zip; unzip -q -o app.zip; rm -f app.zip"
-            echo "代码上传解压完成"
-
-            pip3 install --upgrade pip
-            pip3 install -r requirements.txt
-
-            cd src
-            nohup /usr/local/bin/gunicorn -w 4 -b 0.0.0.0:5000 app:app > /root/app.log 2>&1 &
-            sleep 3
-            echo "✅部署完成"
+          ssh -v -p 51727 \
+            -o HostKeyAlgorithms=+ssh-rsa \
+            -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+            root@${{ secrets.TOUGE_SERVER_IP }} <<'INNER_EOF'
+              set -e
+              echo "成功连接服务器：$(whoami)@$(hostname)"
+              cd /root/flask-web-app || { echo "项目目录不存在"; exit 1; }
+              git pull origin main || { echo "Git拉取失败"; exit 1; }
+              pip3 install --upgrade pip
+              pip3 install -r requirements.txt || { echo "依赖安装失败"; exit 1; }
+              supervisorctl restart flask-web-app || { echo "应用重启失败"; exit 1; }
+              supervisorctl status flask-web-app
+              echo "部署完成"
+            INNER_EOF
+        env:
+          TOUGE_SSH_PRIVATE_KEY: ${{ secrets.TOUGE_SSH_PRIVATE_KEY }}
+          TOUGE_SERVER_IP: ${{ secrets.TOUGE_SERVER_IP }}
